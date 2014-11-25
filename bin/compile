@@ -29,6 +29,14 @@ export_env_dir $ENV_DIR
 #create the cache dir if it doesn't exist
 mkdir -p $CACHE_DIR
 
+# Testing solution for making sass work found here: 
+# https://groups.google.com/d/msg/play-framework/fzGj5RqW-l8/Ztr2PAIUn68J
+mkdir -p $CACHE_DIR/.gems
+gem install -i $CACHE_DIR/.gems --no-rdoc compass
+export PATH=$PATH:$CACHE_DIR/.gems/bin
+export GEM_PATH=$GEM_PATH:$CACHE_DIR/.gems
+
+
 # install JDK
 javaVersion=$(detect_java_version ${BUILD_DIR})
 echo -n "-----> Installing OpenJDK ${javaVersion}..."
@@ -122,6 +130,8 @@ run_sbt "$SBT_USER_HOME_ABSOLUTE" "$SBT_BINDIR/$SBT_JAR" "$SBT_TASKS"
 
 # repack cache
 mkdir -p $CACHE_DIR
+
+
 for DIR in $CACHED_DIRS; do
   cache_copy $DIR $BUILD_DIR $CACHE_DIR
 done
@@ -152,3 +162,5 @@ fi
 
 # Move compiled app back to where Heroku expects it
 mv $BUILD_DIR $APP_BUILD_DIR
+
+# Testing solution for making sass work found here: https://groups.google.com/d/msg/play-framework/fzGj5RqW-l8/Ztr2PAIUn68J
