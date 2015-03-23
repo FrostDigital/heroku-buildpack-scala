@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 . ${BUILDPACK_TEST_RUNNER_HOME}/lib/test_utils.sh
-. ${BUILDPACK_HOME}/bin/common
+. ${BUILDPACK_HOME}/lib/common.sh
 
 EXPECTED_VERSION=0.11.3
 
@@ -9,6 +9,22 @@ FAKE_VERSION="2.1"
 RUN_SBT_OUTPUT="[info] ${FAKE_VERSION}.1"
 
 ### Mocks!
+
+status() {
+  echo "$1..."
+}
+
+status_pending() {
+  echo -n "$1..."
+}
+
+status_done() {
+  echo " done"
+}
+
+error() {
+  echo "ERROR: $1"
+}
 
 _download_and_unpack_ivy_cache() {
   # don't actually do it!
