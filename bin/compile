@@ -9,6 +9,8 @@ BIN_DIR=$BP_DIR/bin
 OPT_DIR=$BP_DIR/opt
 LIB_DIR=$BP_DIR/lib
 . $LIB_DIR/common.sh
+. $LIB_DIR/properties.sh
+. $LIB_DIR/failures.sh
 
 # parse args
 APP_BUILD_DIR=$(cd $1; pwd)
@@ -31,9 +33,19 @@ export PATH=$(echo "$PATH" | sed -e s/$escAppBuildDir/$escBuildDir/g)
 
 export_env_dir $ENV_DIR
 
+# Set system properties as env vars
+SYSPROPFILE="$BUILD_DIR/system.properties"
+
 JVM_COMMON_BUILDPACK=${JVM_COMMON_BUILDPACK:-"https://codon-buildpacks.s3.amazonaws.com/buildpacks/heroku/jvm-common.tgz"}
+JVM_COMMON_BUILDPACK=$(get_property "$SYSPROPFILE" "heroku.jvm.buildpack" "$JVM_COMMON_BUILDPACK")
+KEEP_PLAY_FORK_RUN=$(get_property "$SYSPROPFILE" "sbt.keep-play-fork-run" "${KEEP_PLAY_FORK_RUN:-false}")
+SBT_PROJECT=$(get_property "$SYSPROPFILE" "sbt.project")
+SBT_PRE_TASKS=$(get_property "$SYSPROPFILE" "sbt.pre-tasks" "$SBT_PRE_TASKS")
+SBT_CLEAN=$(get_property "$SYSPROPFILE" "sbt.clean" "${SBT_CLEAN:-false}")
+
+# Install the jvm-common buildpack
 mkdir -p /tmp/jvm-common
-curl --silent --location $JVM_COMMON_BUILDPACK | tar xzm -C /tmp/jvm-common --strip-components=1
+curl --retry 3 --silent --location $JVM_COMMON_BUILDPACK | tar xzm -C /tmp/jvm-common --strip-components=1
 . /tmp/jvm-common/bin/util
 . /tmp/jvm-common/bin/java
 
@@ -97,8 +109,28 @@ sbt's execution as described in this article:
 https://github.com/paulp/sbt-extras#sample-usage"
 fi
 
+if [ "$KEEP_PLAY_FORK_RUN" != "true" ] && [ -f project/play-fork-run.sbt ]; then
+  warning "Removing project/play-fork-run.sbt. This file was probably added
+by Activator, and it breaks sbt. For more information see:
+https://github.com/typesafehub/activator/issues/979
+
+If you need to keep this file you can either rename it or set the following
+configuration variable:
+$ heroku config:set KEEP_PLAY_FORK_RUN=true"
+  rm project/play-fork-run.sbt
+fi
+
 SBT_VERSION="$(get_supported_sbt_version ${BUILD_DIR})"
-SBT_TASKS="compile stage"
+
+if [ -n "$SBT_PROJECT" ]; then
+  SBT_TASKS="$SBT_PROJECT/compile $SBT_PROJECT/stage"
+else
+  SBT_TASKS="compile stage"
+fi
+
+# To run any tasks before the actual build, configure the environment
+# $ heroku config:set SBT_PRE_TASKS=flyway:info
+[ "$SBT_PRE_TASKS" ] && SBT_TASKS="$SBT_PRE_TASKS $SBT_TASKS"
 
 # To enable clean compiles, configure the environment to clean:
 # $ heroku config:set SBT_CLEAN=true
@@ -114,8 +146,9 @@ chmod 0755 $SBT_BINDIR/sbt
 export PATH="$SBT_BINDIR:$PATH"
 
 # copy in heroku sbt plugin
-HEROKU_PLUGIN="HerokuPlugin.scala"
+HEROKU_PLUGIN="HerokuBuildpackPlugin.scala"
 mkdir -p "$SBT_USER_HOME/plugins"
+rm -f $SBT_USER_HOME/plugins/HerokuPlugin.scala # remove the old ambiguously named plugin
 cp -p $OPT_DIR/$HEROKU_PLUGIN $SBT_USER_HOME/plugins/$HEROKU_PLUGIN
 
 # Manually pre-clean because sbt-native-packager doesn't clobber this dir
@@ -141,7 +174,7 @@ done
 
 # drop useless directories from slug for play and sbt-native-launcher only
 if is_sbt_native_packager $BUILD_DIR || is_play $BUILD_DIR; then
-  if [ -d $SBT_USER_HOME/.ivy2 ]; then
+  if [ "$KEEP_IVY_CACHE" != "true" ] && [ -d $SBT_USER_HOME/.ivy2 ]; then
     status "Dropping ivy cache from the slug"
     rm -rf $SBT_USER_HOME/.ivy2
   fi

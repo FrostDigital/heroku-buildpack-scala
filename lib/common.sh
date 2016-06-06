@@ -62,7 +62,18 @@ _has_buildPropertiesFile() {
 
 _has_playConfig() {
   local ctxDir=$1
-  test -e $ctxDir/conf/application.conf
+  test -e $ctxDir/conf/application.conf ||
+      test "$IS_PLAY_APP" = "true" ||
+      (test -n "$PLAY_CONF_FILE" &&
+          test -e "$PLAY_CONF_FILE" &&
+          test "$IS_PLAY_APP" != "false") ||
+      (# test for default Play 2.3 and 2.4 setup.
+          test -d $ctxDir/project &&
+          test -r $ctxDir/project/plugins.sbt &&
+          test -n "$(grep "addSbtPlugin(\"com.typesafe.play\" % \"sbt-plugin\"" $ctxDir/project/plugins.sbt | grep -v ".*//.*addSbtPlugin")" &&
+          test -r $ctxDir/build.sbt &&
+          test -n "$(grep "enablePlugins(Play" $ctxDir/build.sbt | grep -v ".*//.*enablePlugins(Play")" &&
+          test "$IS_PLAY_APP" != "false")
 }
 
 _has_playPluginsFile() {
@@ -77,7 +88,7 @@ get_scala_version() {
   local playVersion=$4
 
   if [ -n "${playVersion}" ]; then
-    if [ "${playVersion}" = "2.3" ]; then
+    if [ "${playVersion}" = "2.3" ] || [ "${playVersion}" = "2.4" ]; then
       # if we don't grep for the version, and instead use `sbt scala-version`,
       # then sbt will try to download the internet
       scalaVersionLine="$(grep "scalaVersion" "${ctxDir}"/build.sbt | sed -E -e 's/[ \t\r\n]//g')"
@@ -109,7 +120,7 @@ get_supported_play_version() {
 
   if _has_playPluginsFile $ctxDir; then
     pluginVersionLine="$(grep "addSbtPlugin(.\+play.\+sbt-plugin" "${ctxDir}"/project/plugins.sbt | sed -E -e 's/[ \t\r\n]//g')"
-    pluginVersion=$(expr "$pluginVersionLine" : ".\+\(2\.[0-3]\)\.[0-9]")
+    pluginVersion=$(expr "$pluginVersionLine" : ".\+\(2\.[0-4]\)\.[0-9]")
     if [ "$pluginVersion" != 0 ]; then
       echo -n "$pluginVersion"
     fi
@@ -121,7 +132,7 @@ get_supported_sbt_version() {
   local ctxDir=$1
   if _has_buildPropertiesFile $ctxDir; then
     sbtVersionLine="$(grep -P '[ \t]*sbt\.version[ \t]*=' "${ctxDir}"/project/build.properties | sed -E -e 's/[ \t\r\n]//g')"
-    sbtVersion=$(expr "$sbtVersionLine" : 'sbt\.version=\(0\.1[1-3]\.[0-9]\(-[a-zA-Z0-9_]*\)*\)$')
+    sbtVersion=$(expr "$sbtVersionLine" : 'sbt\.version=\(0\.1[1-3]\.[0-9]*\(-[a-zA-Z0-9_]*\)*\)$')
     if [ "$sbtVersion" != 0 ] ; then
       echo "$sbtVersion"
     else
@@ -162,14 +173,14 @@ _download_and_unpack_ivy_cache() {
   local scalaVersion=$2
   local playVersion=$3
 
-  baseUrl="http://lang-jvm.s3.amazonaws.com/sbt/v2/sbt-cache"
+  baseUrl="http://lang-jvm.s3.amazonaws.com/sbt/v8/sbt-cache"
   if [ -n "$playVersion" ]; then
     ivyCacheUrl="$baseUrl-play-${playVersion}_${scalaVersion}.tar.gz"
   else
     ivyCacheUrl="$baseUrl-base.tar.gz"
   fi
 
-  curl --silent --max-time 60 --location $ivyCacheUrl | tar xzm -C $sbtUserHome
+  curl --retry 3 --silent --max-time 60 --location $ivyCacheUrl | tar xzm -C $sbtUserHome
   if [ $? -eq 0 ]; then
     mv $sbtUserHome/.sbt/* $sbtUserHome
     rm -rf $sbtUserHome/.sbt
@@ -245,12 +256,28 @@ universal_packaging_default_web_proc() {
   fi
 }
 
+# sed -l basically makes sed replace and buffer through stdin to stdout
+# so you get updates while the command runs and dont wait for the end
+# e.g. sbt stage | indent
+output() {
+  local logfile="$1"
+  local c='s/^/       /'
+
+  case $(uname) in
+      Darwin) tee -a "$logfile" | sed -l "$c";; # mac/bsd sed: -l buffers on line boundaries
+      *)      tee -a "$logfile" | sed -u "$c";; # unix/gnu sed: -u unbuffered (arbitrary) chunks of data
+  esac
+}
+
 run_sbt()
 {
   local javaVersion=$1
   local home=$2
   local launcher=$3
   local tasks=$4
+  local buildLogFile=".heroku/sbt-build.log"
+
+  echo "" > $buildLogFile
 
   case $(ulimit -u) in
   32768) # PX Dyno
@@ -262,7 +289,7 @@ run_sbt()
   esac
 
   status "Running: sbt $tasks"
-  HOME="$home" sbt \
+  HOME="$home" sbt ${SBT_EXTRAS_OPTS} \
     -J-Xmx${maxSbtHeap}M \
     -J-Xms${maxSbtHeap}M \
     -J-XX:+UseCompressedOops \
@@ -275,17 +302,10 @@ run_sbt()
     -Dsbt.global.base=$home \
     -Dsbt.log.noformat=true \
     -no-colors -batch \
-    $tasks < /dev/null 2>&1 | indent
+    $tasks | output $buildLogFile
 
   if [ "${PIPESTATUS[*]}" != "0 0" ]; then
-    error "Failed to run sbt!
-We're sorry this build is failing! If you can't find the issue in application
-code, please submit a ticket so we can help: https://help.heroku.com
-You can also try reverting to our legacy Scala buildpack:
-$ heroku buildpack:set https://github.com/heroku/heroku-buildpack-scala#legacy
-
-Thanks,
-Heroku"
+    handle_sbt_errors $buildLogFile
   fi
 }
 
